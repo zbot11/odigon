@@ -56,7 +56,7 @@ def index():
     <!DOCTYPE html>
     <html>
     <head>
-        <title>Odigon Control Panel</title>
+        <title>Enrich Company Records</title>
         <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
         <style>
             .yes-count-box {
@@ -115,8 +115,7 @@ def index():
     <body>
         <div class="container">
             <div class="header">
-                <h1>ODIGON</h1>
-                <div class="subtitle">Enrich Company Records</div>
+                <h1>ENRICH COMPANY RECORDS</h1>
             </div>
             
             <div class="content">
