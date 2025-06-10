@@ -13,6 +13,19 @@ def clean_column_name(col):
     """Convert column name to PostgreSQL-friendly format"""
     # Convert to lowercase
     col = col.lower()
+    
+    # Handle special cases to match your database schema
+    special_cases = {
+        '# employees': 'num_employees',
+        '#employees': 'num_employees',
+        'employees': 'num_employees'  # In case it's already just 'employees'
+    }
+    
+    # Check if this is a special case
+    if col in special_cases:
+        return special_cases[col]
+    
+    # Otherwise, apply standard cleaning
     # Replace special characters with underscores
     col = re.sub(r'[^\w\s]', '_', col)
     # Replace spaces with underscores
