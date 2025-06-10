@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 import subprocess
 import threading
 import time
+import re
 
 load_dotenv()
 
@@ -15,6 +16,20 @@ DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Global status for background tasks
 task_status = {"running": False, "task": "", "progress": 0, "total": 0}
+
+def clean_column_name(col):
+    """Convert column name to PostgreSQL-friendly format"""
+    # Convert to lowercase
+    col = col.lower()
+    # Replace special characters with underscores
+    col = re.sub(r'[^\w\s]', '_', col)
+    # Replace spaces with underscores
+    col = re.sub(r'\s+', '_', col)
+    # Remove leading/trailing underscores
+    col = col.strip('_')
+    # Replace multiple underscores with single
+    col = re.sub(r'_+', '_', col)
+    return col
 
 @app.route('/')
 def index():
@@ -205,11 +220,23 @@ def upload():
         file = request.files['file']
         df = pd.read_csv(file)
         
+        # Store original row count
+        original_rows = len(df)
+        
+        # Clean column names before inserting
+        df.columns = [clean_column_name(col) for col in df.columns]
+        
+        # Log the column mapping for debugging
+        print("Column names after cleaning:")
+        for col in df.columns:
+            print(f"  - {col}")
+        
         engine = create_engine(DATABASE_URL)
         df.to_sql('apollo_table', engine, if_exists='append', index=False, method='multi', chunksize=500)
         
         return redirect(url_for('index'))
     except Exception as e:
+        print(f"Upload error: {str(e)}")
         return f"Error: {str(e)} <a href='/'>Go back</a>"
 
 # Background task functions

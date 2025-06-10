@@ -1,46 +1,55 @@
 import os
-import sqlite3
 import time
-from datetime import datetime
+from dotenv import load_dotenv
+import psycopg2
 from perplexity_api import query_perplexity
+from config import PROMPTS
+
+load_dotenv()
+
+# Get the prompt to use (can be set via environment variable)
+PROMPT_NAME = os.getenv('PROMPT_NAME', 'default')
+CLASSIFICATION_PROMPT = PROMPTS.get(PROMPT_NAME, PROMPTS['default'])
 
 # Database configuration
-DB_PATH = r"C:\Users\zachw\Trailhead Partners\Trailhead Sharepoint - Documents\Applications\company_industries.db"
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Connect to the database
-conn = sqlite3.connect(DB_PATH)
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
-# First, check how many have already been processed
-cursor.execute("SELECT COUNT(*) FROM 'apollo table' WHERE Status IS NOT NULL")
+# Check how many already processed
+cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE status IS NOT NULL")
 already_processed = cursor.fetchone()[0]
 print(f"Already processed: {already_processed} companies")
 
-
-# Query to fetch Company and Website - LIMIT 5 for testing
+# Query to fetch companies - only where status is NULL
 query = """
-SELECT Company, Website 
-FROM 'apollo table'
-WHERE Company IS NOT NULL AND Website IS NOT NULL AND Status IS NULL
+SELECT company, website 
+FROM apollo_table
+WHERE company IS NOT NULL 
+AND website IS NOT NULL 
+AND status IS NULL
 """
 
 cursor.execute(query)
 rows = cursor.fetchall()
 
 print(f"Remaining to process: {len(rows)} companies")
+print(f"Using prompt: {PROMPT_NAME}")
 
-# Process companies and update database
+# Process companies
 for i, (company, website) in enumerate(rows):
     print(f"\nProcessing {i+1}/{len(rows)}: {company}")
     
-    result = query_perplexity(company, website)
+    result = query_perplexity(company, website, CLASSIFICATION_PROMPT)
     print(f"Result: {result}")
     
-    # Update the Status column in the database
+    # Update status
     update_query = """
-    UPDATE 'apollo table' 
-    SET Status = ? 
-    WHERE Company = ? AND Website = ?
+    UPDATE apollo_table 
+    SET status = %s 
+    WHERE company = %s AND website = %s
     """
     
     cursor.execute(update_query, (result, company, website))
@@ -48,10 +57,8 @@ for i, (company, website) in enumerate(rows):
     
     print(f"Updated database for {company}")
     
-    # Add a small delay to avoid rate limiting
-    if i < len(rows) - 1:  # Don't wait after the last company
+    if i < len(rows) - 1:
         time.sleep(1)
 
 conn.close()
-print(f"\nProcessing complete! Status column updated for {len(rows)} companies.")
-print(f"Total processed in database: {already_processed + len(rows)} companies")
+print(f"\nProcessing complete! Status updated for {len(rows)} companies.")

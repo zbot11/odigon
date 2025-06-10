@@ -14,16 +14,16 @@ conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
 # Count companies without websites
-cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE (Website IS NULL OR Website = '')")
+cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE (website IS NULL OR website = '')")
 total_without_website = cursor.fetchone()[0]
 print(f"Total companies without websites: {total_without_website}")
 
 # Query to fetch companies without websites
 query = """
-SELECT Company, "Company City", "Company State"
+SELECT company, company_city, company_state
 FROM apollo_table
-WHERE (Website IS NULL OR Website = '') 
-AND Company IS NOT NULL
+WHERE (website IS NULL OR website = '') 
+AND company IS NOT NULL
 """
 
 cursor.execute(query)
@@ -40,11 +40,11 @@ for i, (company, city, state) in enumerate(rows):
     if website:
         print(f"Found: {website}")
         
-        # Update Website in the database
+        # Update website in the database
         update_query = """
         UPDATE apollo_table 
-        SET Website = %s
-        WHERE Company = %s AND "Company City" = %s AND "Company State" = %s
+        SET website = %s
+        WHERE company = %s AND company_city = %s AND company_state = %s
         """
         
         cursor.execute(update_query, (website, company, city, state))
