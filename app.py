@@ -1,52 +1,25 @@
 from flask import Flask, render_template_string, request, jsonify, redirect, url_for
 import os
-import pandas as pd
-from sqlalchemy import create_engine
-import psycopg2
-from dotenv import load_dotenv
-import subprocess
 import threading
-import time
-import re
+from dotenv import load_dotenv
+from database_operations import (
+    get_database_stats, 
+    truncate_database, 
+    import_csv_file,
+    find_websites_task,
+    classify_companies_task
+)
 
 load_dotenv()
 
 app = Flask(__name__)
-DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Global status for background tasks
 task_status = {"running": False, "task": "", "progress": 0, "total": 0}
 
-def clean_column_name(col):
-    """Convert column name to PostgreSQL-friendly format"""
-    # Convert to lowercase
-    col = col.lower()
-    # Replace special characters with underscores
-    col = re.sub(r'[^\w\s]', '_', col)
-    # Replace spaces with underscores
-    col = re.sub(r'\s+', '_', col)
-    # Remove leading/trailing underscores
-    col = col.strip('_')
-    # Replace multiple underscores with single
-    col = re.sub(r'_+', '_', col)
-    return col
-
 @app.route('/')
 def index():
-    # Get counts from database
-    conn = psycopg2.connect(DATABASE_URL)
-    cursor = conn.cursor()
-    
-    cursor.execute("SELECT COUNT(*) FROM apollo_table")
-    total_companies = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE website IS NULL OR website = ''")
-    missing_websites = cursor.fetchone()[0]
-    
-    cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE status IS NOT NULL")
-    processed_companies = cursor.fetchone()[0]
-    
-    conn.close()
+    stats = get_database_stats()
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -66,21 +39,21 @@ def index():
                 <div class="status-panel">
                     <div class="status-grid">
                         <div class="status-item">
-                            <div class="status-value">{{ total_companies }}</div>
+                            <div class="status-value">{{ stats.total_companies }}</div>
                             <div class="status-label">Total Records</div>
                         </div>
                         <div class="status-item">
-                            <div class="status-value">{{ missing_websites }}</div>
+                            <div class="status-value">{{ stats.missing_websites }}</div>
                             <div class="status-label">Missing Websites</div>
                         </div>
                         <div class="status-item">
-                            <div class="status-value">{{ processed_companies }}</div>
+                            <div class="status-value">{{ stats.processed_companies }}</div>
                             <div class="status-label">Processed</div>
                         </div>
                     </div>
                 </div>
                 
-                <div class="task-status" id="taskStatus">
+                <div class="task-status" id="taskStatus" style="display: none;">
                     <div class="task-title">Operation in Progress</div>
                     <div class="progress-bar">
                         <div class="progress-fill" id="progressFill"></div>
@@ -94,7 +67,7 @@ def index():
                     </div>
                     <div class="section-content">
                         <div class="warning">
-                            Warning: This will permanently delete all {{ total_companies }} records
+                            Warning: This will permanently delete all {{ stats.total_companies }} records
                         </div>
                         <button class="danger" onclick="truncateDatabase()">TRUNCATE DATABASE</button>
                     </div>
@@ -118,8 +91,8 @@ def index():
                         <span class="icon">🔍</span> Website Discovery
                     </div>
                     <div class="section-content">
-                        <div class="help-text">Search for websites for {{ missing_websites }} companies</div>
-                        <button onclick="findWebsites()" {% if missing_websites == 0 %}disabled{% endif %}>
+                        <div class="help-text">Search for websites for {{ stats.missing_websites }} companies</div>
+                        <button onclick="findWebsites()" {% if stats.missing_websites == 0 %}disabled{% endif %}>
                             FIND WEBSITES
                         </button>
                     </div>
@@ -130,7 +103,7 @@ def index():
                         <span class="icon">🏭</span> Classification
                     </div>
                     <div class="section-content">
-                        <div class="help-text">Process {{ total_companies - processed_companies }} unclassified companies</div>
+                        <div class="help-text">Process {{ stats.total_companies - stats.processed_companies }} unclassified companies</div>
                         <button onclick="classifyCompanies()">
                             CLASSIFY COMPANIES
                         </button>
@@ -143,7 +116,7 @@ def index():
             let statusCheckInterval;
             
             function truncateDatabase() {
-                if (confirm('Are you sure you want to delete all {{ total_companies }} records? This cannot be undone.')) {
+                if (confirm('Are you sure you want to delete all {{ stats.total_companies }} records? This cannot be undone.')) {
                     if (confirm('FINAL WARNING: This will permanently delete all data. Continue?')) {
                         fetch('/truncate', { method: 'POST' })
                             .then(response => response.json())
@@ -183,8 +156,6 @@ def index():
                         .then(response => response.json())
                         .then(data => {
                             if (data.running) {
-                                document.getElementById('taskName').textContent = 
-                                    'Task: ' + data.task;
                                 document.getElementById('progressText').textContent = 
                                     data.progress + ' / ' + data.total + ' completed';
                                 const percent = (data.progress / data.total * 100) || 0;
@@ -200,64 +171,37 @@ def index():
         </script>
     </body>
     </html>
-    ''', total_companies=total_companies, missing_websites=missing_websites, processed_companies=processed_companies)
+    ''', stats=stats)
 
 @app.route('/truncate', methods=['POST'])
 def truncate():
-    try:
-        conn = psycopg2.connect(DATABASE_URL)
-        cursor = conn.cursor()
-        cursor.execute("TRUNCATE TABLE apollo_table")
-        conn.commit()
-        conn.close()
-        return jsonify({"success": True, "message": "Database truncated successfully"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)})
+    success, message = truncate_database()
+    return jsonify({"success": success, "message": message})
 
 @app.route('/upload', methods=['POST'])
 def upload():
     try:
         file = request.files['file']
-        df = pd.read_csv(file)
+        success, message, details = import_csv_file(file_object=file)
         
-        # Store original row count
-        original_rows = len(df)
-        
-        # Clean column names before inserting
-        df.columns = [clean_column_name(col) for col in df.columns]
-        
-        # Log the column mapping for debugging
-        print("Column names after cleaning:")
-        for col in df.columns:
-            print(f"  - {col}")
-        
-        engine = create_engine(DATABASE_URL)
-        df.to_sql('apollo_table', engine, if_exists='append', index=False, method='multi', chunksize=500)
-        
-        return redirect(url_for('index'))
+        if success:
+            return redirect(url_for('index'))
+        else:
+            return f"Error: {message} <a href='/'>Go back</a>"
     except Exception as e:
-        print(f"Upload error: {str(e)}")
         return f"Error: {str(e)} <a href='/'>Go back</a>"
 
-# Background task functions
+# Background task runners
 def run_website_finder():
     global task_status
     task_status = {"running": True, "task": "Website Discovery", "progress": 0, "total": 0}
-    
-    # Import here to avoid circular imports
-    from populate_websites import find_websites_task
     find_websites_task(task_status)
-    
     task_status["running"] = False
 
 def run_classifier():
     global task_status
     task_status = {"running": True, "task": "Company Classification", "progress": 0, "total": 0}
-    
-    # Import here to avoid circular imports  
-    from process_companies import classify_companies_task
     classify_companies_task(task_status)
-    
     task_status["running"] = False
 
 @app.route('/find-websites', methods=['POST'])
