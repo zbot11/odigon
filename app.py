@@ -1,13 +1,16 @@
-from flask import Flask, render_template_string, request, jsonify, redirect, url_for
+from flask import Flask, render_template_string, request, jsonify, redirect, url_for, send_file
 import os
 import threading
+import io
+import pandas as pd
 from dotenv import load_dotenv
 from database_operations import (
     get_database_stats, 
     truncate_database, 
     import_csv_file,
     find_websites_task,
-    classify_companies_task
+    classify_companies_task,
+    get_companies_for_export
 )
 
 load_dotenv()
@@ -15,11 +18,39 @@ load_dotenv()
 app = Flask(__name__)
 
 # Global status for background tasks
-task_status = {"running": False, "task": "", "progress": 0, "total": 0}
+task_status = {
+    "running": False, 
+    "task": "", 
+    "progress": 0, 
+    "total": 0,
+    "current_company": "",
+    "yes_count": 0,
+    "no_count": 0
+}
+
+# Store the current prompt
+current_prompt = """Search the internet for the company {company_name}, website {website} and determine if the company is a home furnishings manufacturer or not. 
+
+A home furnishings manufacturer must meet ALL of these criteria:
+- They must MANUFACTURE (not just retail) furniture
+- The furniture must be for HOME/RESIDENTIAL use (not commercial, office, or institutional)
+- They must make furniture like sofas, chairs, tables, beds, dressers, or other residential furniture
+- They are NOT just cabinetry, casework, mattresses only, or building materials
+
+IMPORTANT: Respond with ONLY the single word YES or NO. Do not include any explanation."""
 
 @app.route('/')
 def index():
     stats = get_database_stats()
+    
+    # Calculate YES count from database
+    import psycopg2
+    from database_operations import DATABASE_URL
+    conn = psycopg2.connect(DATABASE_URL)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE status = 'YES'")
+    yes_count = cursor.fetchone()[0]
+    conn.close()
     
     return render_template_string('''
     <!DOCTYPE html>
@@ -27,12 +58,65 @@ def index():
     <head>
         <title>Odigon Control Panel</title>
         <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+        <style>
+            .yes-count-box {
+                background: #28a745;
+                color: white;
+                padding: 20px;
+                border-radius: 8px;
+                text-align: center;
+                margin: 20px 0;
+            }
+            .yes-count-box .count {
+                font-size: 48px;
+                font-weight: bold;
+            }
+            .yes-count-box .label {
+                font-size: 18px;
+                margin-top: 10px;
+            }
+            .current-company-box {
+                background: #f8f9fa;
+                border: 2px solid #dee2e6;
+                padding: 15px;
+                border-radius: 8px;
+                margin: 20px 0;
+                min-height: 60px;
+            }
+            .current-company-box .label {
+                font-weight: bold;
+                color: #495057;
+                margin-bottom: 5px;
+            }
+            .current-company-box .company-name {
+                font-size: 18px;
+                color: #007bff;
+            }
+            .prompt-section {
+                margin: 20px 0;
+                padding: 20px;
+                background: #f8f9fa;
+                border-radius: 8px;
+            }
+            .prompt-section textarea {
+                width: 100%;
+                min-height: 150px;
+                padding: 10px;
+                border: 1px solid #ced4da;
+                border-radius: 4px;
+                font-family: monospace;
+                font-size: 14px;
+            }
+            .prompt-section button {
+                margin-top: 10px;
+            }
+        </style>
     </head>
     <body>
         <div class="container">
             <div class="header">
                 <h1>ODIGON</h1>
-                <div class="subtitle">Industrial Data Enrichment Platform v2.1</div>
+                <div class="subtitle">Enrich Company Records</div>
             </div>
             
             <div class="content">
@@ -53,12 +137,34 @@ def index():
                     </div>
                 </div>
                 
+                <div class="yes-count-box">
+                    <div class="count" id="yesCount">{{ yes_count }}</div>
+                    <div class="label">Companies Marked YES</div>
+                </div>
+                
+                <div class="current-company-box" id="currentCompanyBox" style="display: none;">
+                    <div class="label">Currently Processing:</div>
+                    <div class="company-name" id="currentCompany">-</div>
+                </div>
+                
                 <div class="task-status" id="taskStatus" style="display: none;">
                     <div class="task-title">Operation in Progress</div>
                     <div class="progress-bar">
                         <div class="progress-fill" id="progressFill"></div>
                     </div>
                     <div class="progress-text" id="progressText"></div>
+                    <div class="progress-stats" id="progressStats" style="margin-top: 10px;"></div>
+                </div>
+                
+                <div class="section">
+                    <div class="section-header">
+                        <span class="icon">💾</span> Export Data
+                    </div>
+                    <div class="section-content">
+                        <div class="help-text">Download the complete company database as CSV</div>
+                        <button onclick="downloadData()">DOWNLOAD ALL DATA</button>
+                        <button onclick="downloadData('YES')" style="background-color: #28a745;">DOWNLOAD YES ONLY</button>
+                    </div>
                 </div>
                 
                 <div class="section">
@@ -98,6 +204,17 @@ def index():
                     </div>
                 </div>
                 
+                <div class="section prompt-section">
+                    <div class="section-header">
+                        <span class="icon">📝</span> Classification Prompt
+                    </div>
+                    <div class="section-content">
+                        <div class="help-text">Edit the prompt used for company classification</div>
+                        <textarea id="classificationPrompt">{{ current_prompt }}</textarea>
+                        <button onclick="updatePrompt()">UPDATE PROMPT</button>
+                    </div>
+                </div>
+                
                 <div class="section">
                     <div class="section-header">
                         <span class="icon">🏭</span> Classification
@@ -128,8 +245,32 @@ def index():
                 }
             }
             
+            function downloadData(statusFilter) {
+                let url = '/download';
+                if (statusFilter) {
+                    url += '?status=' + statusFilter;
+                }
+                window.location.href = url;
+            }
+            
+            function updatePrompt() {
+                const prompt = document.getElementById('classificationPrompt').value;
+                fetch('/update-prompt', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ prompt: prompt })
+                })
+                .then(response => response.json())
+                .then(data => {
+                    alert('Prompt updated successfully!');
+                });
+            }
+            
             function findWebsites() {
                 document.getElementById('taskStatus').style.display = 'block';
+                document.getElementById('currentCompanyBox').style.display = 'block';
                 fetch('/find-websites', { method: 'POST' })
                     .then(response => response.json())
                     .then(data => {
@@ -141,6 +282,7 @@ def index():
             
             function classifyCompanies() {
                 document.getElementById('taskStatus').style.display = 'block';
+                document.getElementById('currentCompanyBox').style.display = 'block';
                 fetch('/classify-companies', { method: 'POST' })
                     .then(response => response.json())
                     .then(data => {
@@ -160,18 +302,32 @@ def index():
                                     data.progress + ' / ' + data.total + ' completed';
                                 const percent = (data.progress / data.total * 100) || 0;
                                 document.getElementById('progressFill').style.width = percent + '%';
+                                
+                                // Update current company
+                                if (data.current_company) {
+                                    document.getElementById('currentCompany').textContent = data.current_company;
+                                }
+                                
+                                // Update YES/NO stats for classification
+                                if (data.task === 'Company Classification') {
+                                    document.getElementById('progressStats').textContent = 
+                                        `YES: ${data.yes_count} | NO: ${data.no_count}`;
+                                    document.getElementById('yesCount').textContent = 
+                                        {{ yes_count }} + data.yes_count;
+                                }
                             } else {
                                 clearInterval(statusCheckInterval);
                                 document.getElementById('taskStatus').style.display = 'none';
+                                document.getElementById('currentCompanyBox').style.display = 'none';
                                 location.reload();
                             }
                         });
-                }, 2000);
+                }, 1000);  // Update every second
             }
         </script>
     </body>
     </html>
-    ''', stats=stats)
+    ''', stats=stats, yes_count=yes_count, current_prompt=current_prompt)
 
 @app.route('/truncate', methods=['POST'])
 def truncate():
@@ -191,17 +347,60 @@ def upload():
     except Exception as e:
         return f"Error: {str(e)} <a href='/'>Go back</a>"
 
+@app.route('/download')
+def download():
+    status_filter = request.args.get('status')
+    df = get_companies_for_export(status_filter)
+    
+    # Create a BytesIO object
+    output = io.BytesIO()
+    df.to_csv(output, index=False)
+    output.seek(0)
+    
+    filename = f"companies_{'yes_only' if status_filter == 'YES' else 'all'}.csv"
+    
+    return send_file(
+        output,
+        mimetype='text/csv',
+        as_attachment=True,
+        download_name=filename
+    )
+
+@app.route('/update-prompt', methods=['POST'])
+def update_prompt():
+    global current_prompt
+    data = request.get_json()
+    current_prompt = data.get('prompt', current_prompt)
+    return jsonify({"success": True})
+
 # Background task runners
 def run_website_finder():
     global task_status
-    task_status = {"running": True, "task": "Website Discovery", "progress": 0, "total": 0}
+    task_status = {
+        "running": True, 
+        "task": "Website Discovery", 
+        "progress": 0, 
+        "total": 0,
+        "current_company": "",
+        "yes_count": 0,
+        "no_count": 0
+    }
     find_websites_task(task_status)
     task_status["running"] = False
 
 def run_classifier():
-    global task_status
-    task_status = {"running": True, "task": "Company Classification", "progress": 0, "total": 0}
-    classify_companies_task(task_status)
+    global task_status, current_prompt
+    task_status = {
+        "running": True, 
+        "task": "Company Classification", 
+        "progress": 0, 
+        "total": 0,
+        "current_company": "",
+        "yes_count": 0,
+        "no_count": 0
+    }
+    # Pass the current prompt to the classification task
+    classify_companies_task(task_status, current_prompt)
     task_status["running"] = False
 
 @app.route('/find-websites', methods=['POST'])

@@ -136,6 +136,7 @@ def find_websites_task(status_dict):
         
         for i, (company, city, state) in enumerate(rows):
             status_dict['progress'] = i + 1
+            status_dict['current_company'] = f"{company} ({city}, {state})"
             
             website = find_website(company, city, state)
             
@@ -154,15 +155,16 @@ def find_websites_task(status_dict):
     finally:
         conn.close()
 
-def classify_companies_task(status_dict):
+def classify_companies_task(status_dict, classification_prompt=None):
     """Classify companies based on their websites"""
     from perplexity_api import query_perplexity
     from config import PROMPTS
     import time
     
-    # Get the prompt
-    PROMPT_NAME = os.getenv('PROMPT_NAME', 'default')
-    CLASSIFICATION_PROMPT = PROMPTS.get(PROMPT_NAME, PROMPTS['default'])
+    # Use provided prompt or default
+    if classification_prompt is None:
+        PROMPT_NAME = os.getenv('PROMPT_NAME', 'default')
+        classification_prompt = PROMPTS.get(PROMPT_NAME, PROMPTS['default'])
     
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
@@ -183,10 +185,17 @@ def classify_companies_task(status_dict):
         
         for i, (company, website) in enumerate(rows):
             status_dict['progress'] = i + 1
+            status_dict['current_company'] = company
             
-            result = query_perplexity(company, website, CLASSIFICATION_PROMPT)
+            result = query_perplexity(company, website, classification_prompt)
             
             if result:
+                # Update YES/NO counts
+                if result == "YES":
+                    status_dict['yes_count'] += 1
+                elif result == "NO":
+                    status_dict['no_count'] += 1
+                
                 cursor.execute("""
                     UPDATE apollo_table 
                     SET status = %s 
