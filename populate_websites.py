@@ -1,24 +1,27 @@
 import os
-import sqlite3
+import psycopg2
 import time
 from perplexity_find_website import find_website
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # Database configuration
-DB_PATH = r"C:\Users\zachw\Trailhead Partners\Trailhead Sharepoint - Documents\Applications\company_industries.db"
+DATABASE_URL = os.getenv('DATABASE_URL')
 
 # Connect to the database
-conn = sqlite3.connect(DB_PATH)
+conn = psycopg2.connect(DATABASE_URL)
 cursor = conn.cursor()
 
 # Count companies without websites
-cursor.execute("SELECT COUNT(*) FROM 'apollo table' WHERE (Website IS NULL OR Website = '')")
+cursor.execute("SELECT COUNT(*) FROM apollo_table WHERE (Website IS NULL OR Website = '')")
 total_without_website = cursor.fetchone()[0]
 print(f"Total companies without websites: {total_without_website}")
 
 # Query to fetch companies without websites
 query = """
 SELECT Company, "Company City", "Company State"
-FROM 'apollo table'
+FROM apollo_table
 WHERE (Website IS NULL OR Website = '') 
 AND Company IS NOT NULL
 """
@@ -39,9 +42,9 @@ for i, (company, city, state) in enumerate(rows):
         
         # Update Website in the database
         update_query = """
-        UPDATE 'apollo table' 
-        SET Website = ?
-        WHERE Company = ? AND "Company City" = ? AND "Company State" = ?
+        UPDATE apollo_table 
+        SET Website = %s
+        WHERE Company = %s AND "Company City" = %s AND "Company State" = %s
         """
         
         cursor.execute(update_query, (website, company, city, state))
